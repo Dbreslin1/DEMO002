@@ -238,7 +238,7 @@ def main():
     # parser.add_argument("--body-threshold", type=float, default=-650.0)
 
     # NEW  default threshold:
-    parser.add_argument("--body-threshold", type=float, default=-75.0)
+    parser.add_argument("--body-threshold", type=float, default=10)
 
     parser.add_argument("--crop-mode", choices=["xy_only", "xyz"], default="xy_only")
     parser.add_argument("--margin-xy", type=int, default=20)
