@@ -7,6 +7,11 @@ import nibabel as nib
 import numpy as np
 from scipy import ndimage as ndi
 
+#SIDE NOTE FOR MYSELF
+#could the reason there is no crop be taht the mask is entering the if statement where it is empty and ust returns the 
+#original image? 
+#need to check this out after the 2d experiment (if unsuccessful)
+
 
 def load_nifti(path):
     nii = nib.load(str(path))
@@ -17,10 +22,10 @@ def load_nifti(path):
 def save_nifti(data, affine, header, path):
     out = nib.Nifti1Image(data, affine, header=header)
     nib.save(out, str(path))
-
-
+'''
+ DEMO PROVED THIS DOESNT WORK SO REMOVING FOR NOW - MAYBE REVISIT LATER
 def keep_largest_component(mask, min_size=10000):
-    labeled_mask, num_components = ndi.label(mask)
+    #labeled_mask, num_components = ndi.label(mask)
 
     if num_components == 0:
         return mask
@@ -33,7 +38,41 @@ def keep_largest_component(mask, min_size=10000):
         return mask
 
     return labeled_mask == largest_label
+'''
+# new approach 
+#remove anything touching the border as this shouldnt be the patient and taht way i can gaurentee that the largest component is the patient body
+def remove_border_components_2d(mask2d):
+    labeled, num = ndi.label(mask2d)
+    if num == 0:
+        return mask2d
 
+    border_labels = set()
+
+    # collect labels touching the border
+    border_labels.update(np.unique(labeled[0, :]))
+    border_labels.update(np.unique(labeled[-1, :]))
+    border_labels.update(np.unique(labeled[:, 0]))
+    border_labels.update(np.unique(labeled[:, -1]))
+
+    cleaned = labeled.copy()
+    for lab in border_labels:
+        cleaned[cleaned == lab] = 0
+
+    return cleaned > 0
+
+#new 2d helper
+def largest_component_2d(mask2d):
+    labeled, num = ndi.label(mask2d)
+    if num == 0:
+        return mask2d
+
+    sizes = np.bincount(labeled.ravel())
+    sizes[0] = 0
+    largest = np.argmax(sizes)
+    return labeled == largest
+
+'''
+remove too as im doing it with 2d slices now 
 
 def create_body_mask(image, threshold, closing_iters=1, opening_iters=0, min_size=10000):
     mask = image > threshold
@@ -48,9 +87,41 @@ def create_body_mask(image, threshold, closing_iters=1, opening_iters=0, min_siz
     mask = keep_largest_component(mask, min_size)
 
     return mask
+'''
+#new 2d version 
+def get_body_mask(image, threshold, min_size=10000):
+    """
+    image shape expected: (X, Y, Z)
+    returns a 3D body mask, built slice-by-slice
+    """
+    body_mask = np.zeros_like(image, dtype=bool)
+
+    for z in range(image.shape[2]):
+        sl = image[:, :, z]
+
+        # threshold this 2D slice
+        mask = sl > threshold
+
+        # fill small gaps inside the body region
+        mask = ndi.binary_fill_holes(mask)
+
+        # remove anything touching the slice border
+        mask = remove_border_components_2d(mask)
+
+        # keep the largest remaining structure
+        mask = largest_component_2d(mask)
+
+        # light smoothing
+        mask = ndi.binary_closing(mask, iterations=1)
+
+        body_mask[:, :, z] = mask
+
+    #  3D cleanup after stacking slices
+    body_mask = ndi.binary_fill_holes(body_mask)
+    return body_mask
 
 
-def get_bounding_box(mask):
+def get_bbox(mask):
     coords = np.where(mask)
 
     if coords[0].size == 0:
@@ -62,120 +133,80 @@ def get_bounding_box(mask):
     return x0, x1, y0, y1, z0, z1
 
 
-def expand_bounding_box(bbox, image_shape, margin_xy, margin_z, crop_mode):
+def expand_bbox(bbox, shape, margin_xy, margin_z, crop_mode):
     x0, x1, y0, y1, z0, z1 = bbox
 
     x0 = max(0, x0 - margin_xy)
-    x1 = min(image_shape[0], x1 + margin_xy)
-
+    x1 = min(shape[0], x1 + margin_xy)
     y0 = max(0, y0 - margin_xy)
-    y1 = min(image_shape[1], y1 + margin_xy)
+    y1 = min(shape[1], y1 + margin_xy)
 
     if crop_mode == "xy_only":
-        z0, z1 = 0, image_shape[2]
+        z0, z1 = 0, shape[2]
     else:
         z0 = max(0, z0 - margin_z)
-        z1 = min(image_shape[2], z1 + margin_z)
+        z1 = min(shape[2], z1 + margin_z)
 
-    return (
-        slice(x0, x1),
-        slice(y0, y1),
-        slice(z0, z1),
-    )
+    return (slice(x0, x1), slice(y0, y1), slice(z0, z1))
 
 
-def update_affine_for_crop(original_affine, crop_slices):
-    crop_start = np.array([
+def cropped_affine(affine, crop_slices):
+    start = np.array([
         crop_slices[0].start,
         crop_slices[1].start,
         crop_slices[2].start,
         1.0
     ])
-
-    new_affine = original_affine.copy()
-    # Adjust spatial origin after cropping
-    new_affine[:3, 3] = (original_affine @ crop_start)[:3]
-
+    new_affine = affine.copy()
+    new_affine[:3, 3] = (affine @ start)[:3]
     return new_affine
 
 
-def process_case(
-    image_path,
-    label_path,
-    output_image_path,
-    output_label_path,
-    threshold,
-    margin_xy,
-    margin_z,
-    crop_mode
-):
-    image_nii, image = load_nifti(image_path)
-    label_nii, label = load_nifti(label_path)
+def process_case(img_path, lab_path, out_img_path, out_lab_path, threshold, margin_xy, margin_z, crop_mode):
+    img_nii, img = load_nifti(img_path)
+    lab_nii, lab = load_nifti(lab_path)
 
-    if image.ndim != 3:
-        raise ValueError(f"Image is not 3D: {image_path}")
+    if img.ndim != 3:
+        raise ValueError(f"Image is not 3D: {img_path}")
+    if lab.ndim != 3:
+        raise ValueError(f"Label is not 3D: {lab_path}")
 
-    if label.ndim != 3:
-        raise ValueError(f"Label is not 3D: {label_path}")
+    original_shape = list(img.shape)
 
-    original_shape = list(image.shape)
-
-    body_mask = create_body_mask(image, threshold)
-    bbox = get_bounding_box(body_mask)
+    body_mask = get_body_mask(img, threshold)
+    bbox = get_bbox(body_mask)
 
     if bbox is None:
-        crop_slices = (
-            slice(0, image.shape[0]),
-            slice(0, image.shape[1]),
-            slice(0, image.shape[2]),
-        )
+        crop = (slice(0, img.shape[0]), slice(0, img.shape[1]), slice(0, img.shape[2]))
     else:
-        crop_slices = expand_bounding_box(
-            bbox,
-            image.shape,
-            margin_xy,
-            margin_z,
-            crop_mode,
-        )
+        crop = expand_bbox(bbox, img.shape, margin_xy, margin_z, crop_mode)
 
-    cropped_image = image[crop_slices].astype(np.float32)
-    cropped_label = np.rint(label[crop_slices]).astype(np.uint8)
+    cropped_img = img[crop].astype(np.float32)
+    cropped_lab = np.rint(lab[crop]).astype(np.uint8)
 
-    image_header = image_nii.header.copy()
-    label_header = label_nii.header.copy()
+    img_header = img_nii.header.copy()
+    lab_header = lab_nii.header.copy()
+    img_header.set_data_dtype(np.float32)
+    lab_header.set_data_dtype(np.uint8)
 
-    image_header.set_data_dtype(np.float32)
-    label_header.set_data_dtype(np.uint8)
-
-    save_nifti(
-        cropped_image,
-        update_affine_for_crop(image_nii.affine, crop_slices),
-        image_header,
-        output_image_path
-    )
-
-    save_nifti(
-        cropped_label,
-        update_affine_for_crop(label_nii.affine, crop_slices),
-        label_header,
-        output_label_path
-    )
+    save_nifti(cropped_img, cropped_affine(img_nii.affine, crop), img_header, out_img_path)
+    save_nifti(cropped_lab, cropped_affine(lab_nii.affine, crop), lab_header, out_lab_path)
 
     return {
-        "case": image_path.name.replace("_0000.nii.gz", ""),
+        "case": img_path.name.replace("_0000.nii.gz", ""),
         "original_shape": original_shape,
-        "cropped_shape": list(cropped_image.shape),
+        "cropped_shape": list(cropped_img.shape),
         "crop_bbox": {
-            "x": [crop_slices[0].start, crop_slices[0].stop],
-            "y": [crop_slices[1].start, crop_slices[1].stop],
-            "z": [crop_slices[2].start, crop_slices[2].stop],
+            "x": [crop[0].start, crop[0].stop],
+            "y": [crop[1].start, crop[1].stop],
+            "z": [crop[2].start, crop[2].stop],
         },
-        "label_voxels_after_crop": int(np.sum(cropped_label > 0)),
+        "label_voxels_after_crop": int(np.sum(cropped_lab > 0)),
         "image_stats_after_crop": {
-            "min": float(cropped_image.min()),
-            "max": float(cropped_image.max()),
-            "mean": float(cropped_image.mean()),
-            "std": float(cropped_image.std()),
+            "min": float(cropped_img.min()),
+            "max": float(cropped_img.max()),
+            "mean": float(cropped_img.mean()),
+            "std": float(cropped_img.std()),
         },
     }
 
@@ -184,7 +215,13 @@ def main():
     parser = argparse.ArgumentParser(description="Crop CT scans to body region for nnU-Net")
     parser.add_argument("--src", required=True)
     parser.add_argument("--dst", required=True)
-    parser.add_argument("--body-threshold", type=float, default=-650.0)
+
+    # OLD default threshold:
+    # parser.add_argument("--body-threshold", type=float, default=-650.0)
+
+    # NEW  default threshold:
+    parser.add_argument("--body-threshold", type=float, default=-400.0)
+
     parser.add_argument("--crop-mode", choices=["xy_only", "xyz"], default="xy_only")
     parser.add_argument("--margin-xy", type=int, default=20)
     parser.add_argument("--margin-z", type=int, default=8)
@@ -210,18 +247,18 @@ def main():
 
     reports = []
 
-    for i, image_path in enumerate(image_files, start=1):
-        case_id = image_path.name.replace("_0000.nii.gz", "")
-        label_path = src_labels / f"{case_id}.nii.gz"
+    for i, img_path in enumerate(image_files, 1):
+        case = img_path.name.replace("_0000.nii.gz", "")
+        lab_path = src_labels / f"{case}.nii.gz"
 
-        if not label_path.exists():
-            raise FileNotFoundError(f"Missing label for case {case_id}: {label_path}")
+        if not lab_path.exists():
+            raise FileNotFoundError(f"Missing label for case {case}: {lab_path}")
 
         report = process_case(
-            image_path,
-            label_path,
-            dst_images / f"{case_id}_0000.nii.gz",
-            dst_labels / f"{case_id}.nii.gz",
+            img_path,
+            lab_path,
+            dst_images / f"{case}_0000.nii.gz",
+            dst_labels / f"{case}.nii.gz",
             args.body_threshold,
             args.margin_xy,
             args.margin_z,
@@ -229,7 +266,12 @@ def main():
         )
 
         reports.append(report)
-        print(f"[{i}/{len(image_files)}] {case_id}: {report['cropped_shape']}")
+        print(
+            f"[{i}/{len(image_files)}] {case}: "
+            f"original={report['original_shape']} "
+            f"cropped={report['cropped_shape']} "
+            f"bbox={report['crop_bbox']}"
+        )
 
     with open(src / "dataset.json", "r") as f:
         dataset_json = json.load(f)
