@@ -89,7 +89,7 @@ def create_body_mask(image, threshold, closing_iters=1, opening_iters=0, min_siz
     return mask
 '''
 #new 2d version 
-def get_body_mask(image, threshold, min_size=10000):
+def get_body_mask(image, threshold, min_size=10000, debug=False):
     """
     image shape expected: (X, Y, Z)
     returns a 3D body mask, built slice-by-slice
@@ -101,23 +101,39 @@ def get_body_mask(image, threshold, min_size=10000):
 
         # threshold this 2D slice
         mask = sl > threshold
-
+        threshold_sum = int(mask.sum())
         # fill small gaps inside the body region
         mask = ndi.binary_fill_holes(mask)
-
+        fill_sum = int(mask.sum())
         # remove anything touching the slice border
         mask = remove_border_components_2d(mask)
-
+        border_removed_sum = int(mask.sum())
         # keep the largest remaining structure
         mask = largest_component_2d(mask)
-
+        largest_sum = int(mask.sum())
         # light smoothing
         mask = ndi.binary_closing(mask, iterations=1)
+        closed_sum = int(mask.sum())
+
 
         body_mask[:, :, z] = mask
-
-    #  3D cleanup after stacking slices
+        if debug and z in [0, image.shape[2]//4, image.shape[2]//2, 3*image.shape[2]//4, image.shape[2]-1]:
+            print(
+                f"Slice {z}: "
+                f"threshold={threshold_sum}, "
+                f"fill={fill_sum}, "
+                f"border_removed={border_removed_sum}, "
+                f"largest={largest_sum}, "
+                f"closed={closed_sum}"
+            )
+    # 3D cleanup after stacking slices
+    before_3d_fill = int(body_mask.sum())
     body_mask = ndi.binary_fill_holes(body_mask)
+    after_3d_fill = int(body_mask.sum())
+
+    if debug:
+        print(f"3D fill holes: before={before_3d_fill}, after={after_3d_fill}")
+
     return body_mask
 
 
@@ -173,8 +189,10 @@ def process_case(img_path, lab_path, out_img_path, out_lab_path, threshold, marg
 
     original_shape = list(img.shape)
 
-    body_mask = get_body_mask(img, threshold)
+    body_mask = get_body_mask(img, threshold, debug=True)
+    print("Body mask true voxels:", int(body_mask.sum()))
     bbox = get_bbox(body_mask)
+    print("Raw bbox:", bbox)
 
     if bbox is None:
         crop = (slice(0, img.shape[0]), slice(0, img.shape[1]), slice(0, img.shape[2]))
