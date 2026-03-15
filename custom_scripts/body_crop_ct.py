@@ -61,7 +61,7 @@ def remove_border_components_2d(mask2d):
     return cleaned > 0
 
 #new 2d helper
-def largest_component_2d(mask2d):
+def largest_component_2d(mask2d, min_pixels=5000):
     labeled, num = ndi.label(mask2d)
     if num == 0:
         return mask2d
@@ -69,6 +69,10 @@ def largest_component_2d(mask2d):
     sizes = np.bincount(labeled.ravel())
     sizes[0] = 0
     largest = np.argmax(sizes)
+
+    if sizes[largest] < min_pixels:
+        return np.zeros_like(mask2d, dtype=bool)
+
     return labeled == largest
 
 '''
@@ -109,7 +113,7 @@ def get_body_mask(image, threshold, min_size=10000, debug=False):
         mask = remove_border_components_2d(mask)
         border_removed_sum = int(mask.sum())
         # keep the largest remaining structure
-        mask = largest_component_2d(mask)
+        mask = largest_component_2d(mask, min_pixels=5000)
         largest_sum = int(mask.sum())
         # light smoothing
         mask = ndi.binary_closing(mask, iterations=1)
