@@ -106,12 +106,12 @@ def get_body_mask(image, threshold, min_size=10000, debug=False):
         # threshold this 2D slice
         mask = sl > threshold
         threshold_sum = int(mask.sum())
-        # fill small gaps inside the body region
-        mask = ndi.binary_fill_holes(mask)
-        fill_sum = int(mask.sum())
         # remove anything touching the slice border
         mask = remove_border_components_2d(mask)
         border_removed_sum = int(mask.sum())
+        # fill small gaps inside the body region
+        mask = ndi.binary_fill_holes(mask)
+        fill_sum = int(mask.sum())
         # keep the largest remaining structure
         mask = largest_component_2d(mask, min_pixels=5000)
         largest_sum = int(mask.sum())
